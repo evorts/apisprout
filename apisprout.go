@@ -66,11 +66,11 @@ func NewContentNegotiator(accept string) *ContentNegotiator {
 	}
 }
 
-// Match returns true if the given mediatype string matches any of the allowed
+// Match returns true if the given media-type string matches any of the allowed
 // types in the accept header.
-func (cn *ContentNegotiator) Match(mediatype string) bool {
-	for _, glob := range cn.globs {
-		if glob.Match(mediatype) {
+func (cn *ContentNegotiator) Match(mediaType string) bool {
+	for _, glb := range cn.globs {
+		if glb.Match(mediaType) {
 			return true
 		}
 	}
@@ -85,7 +85,7 @@ func main() {
 	viper.SetConfigName("config")
 	viper.AddConfigPath("/etc/apisprout/")
 	viper.AddConfigPath("$HOME/.apisprout/")
-	viper.ReadInConfig()
+	_ = viper.ReadInConfig()
 
 	// Load configuration from the environment if provided. Flags below get
 	// transformed automatically, e.g. `foo-bar` -> `SPROUT_FOO_BAR`.
@@ -109,9 +109,10 @@ func main() {
 	addParameter(flags, "port", "p", 8000, "HTTP port")
 	addParameter(flags, "validate-server", "", false, "Check hostname against configured servers")
 	addParameter(flags, "validate-request", "", false, "Check request data structure")
+	addParameter(flags, "cors-enable", "c", true, "Enable CORS and Request Pre-flight")
 
 	// Run the app!
-	root.Execute()
+	_ = root.Execute()
 }
 
 // addParameter adds a new global parameter with a default value that can be
@@ -126,7 +127,7 @@ func addParameter(flags *pflag.FlagSet, name, short string, def interface{}, des
 	case string:
 		flags.StringP(name, short, v, desc)
 	}
-	viper.BindPFlag(name, flags.Lookup(name))
+	_ = viper.BindPFlag(name, flags.Lookup(name))
 }
 
 // getTypedExample will return an example from a given media type, if such an
@@ -185,7 +186,8 @@ func getExample(negotiator *ContentNegotiator, prefer string, op *openapi3.Opera
 			status = http.StatusOK
 		}
 
-		if response.Value.Content == nil {
+		if //noinspection GoBinaryAndUnaryExpressionTypesCompatibility
+		response.Value.Content == nil {
 			// This is a valid response but has no body defined.
 			return status, "", "", nil
 		}
@@ -223,7 +225,7 @@ func server(cmd *cobra.Command, args []string) {
 		}
 
 		data, err = ioutil.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -252,12 +254,28 @@ func server(cmd *cobra.Command, args []string) {
 		swagger.Servers = make([]*openapi3.Server, 0)
 	}
 
+	corsStatus := "CORS Disabled"
+	if viper.GetBool("cors-enable") {
+		corsStatus = "CORS Enabled"
+	}
+
 	// Create a new router using the OpenAPI document's declared paths.
 	var router = openapi3filter.NewRouter().WithSwagger(swagger)
 
 	// Register our custom HTTP handler that will use the router to find
 	// the appropriate OpenAPI operation and try to return an example.
 	http.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
+		if corsStatus == "CORS Enabled" {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
+			w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, Client-Id, Client-Version")
+
+			// request pre-flight
+			if (*req).Method == "OPTIONS" {
+				return
+			}
+		}
+
 		info := fmt.Sprintf("%s %v", req.Method, req.URL)
 		route, _, err := router.FindRoute(req.Method, req.URL)
 		if err != nil {
@@ -286,7 +304,7 @@ func server(cmd *cobra.Command, args []string) {
 			if err != nil {
 				log.Printf("ERROR: %s => %v", info, err)
 				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte(fmt.Sprintf("%v", err)))
+				_, _ = w.Write([]byte(fmt.Sprintf("%v", err)))
 				return
 			}
 		}
@@ -306,15 +324,15 @@ func server(cmd *cobra.Command, args []string) {
 			prefer = ""
 		}
 
-		status, mediatype, example, err := getExample(negotiator, prefer, route.Operation)
+		status, mediaType, example, err := getExample(negotiator, prefer, route.Operation)
 		if err != nil {
 			log.Printf("%s => Missing example", info)
 			w.WriteHeader(http.StatusTeapot)
-			w.Write([]byte("No example available."))
+			_, _ = w.Write([]byte("No example available."))
 			return
 		}
 
-		log.Printf("%s => %d (%s)", info, status, mediatype)
+		log.Printf("%s => %d (%s)", info, status, mediaType)
 
 		var encoded []byte
 
@@ -323,30 +341,31 @@ func server(cmd *cobra.Command, args []string) {
 		} else if _, ok := example.([]byte); ok {
 			encoded = example.([]byte)
 		} else {
-			switch mediatype {
+			switch mediaType {
 			case "application/json":
 				encoded, err = json.MarshalIndent(example, "", "  ")
 			case "application/x-yaml", "application/yaml", "text/x-yaml", "text/yaml", "text/vnd.yaml":
 				encoded, err = yaml.Marshal(example)
 			default:
-				log.Printf("Cannot marshal as '%s'!", mediatype)
+				log.Printf("Cannot marshal as '%s'!", mediaType)
 				err = ErrCannotMarshal
 			}
 
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
-				w.Write([]byte("Unable to marshal response"))
+				_, _ = w.Write([]byte("Unable to marshal response"))
 				return
 			}
 		}
 
-		if mediatype != "" {
-			w.Header().Add("Content-Type", mediatype)
+		if mediaType != "" {
+			w.Header().Add("Content-Type", mediaType)
 		}
+
 		w.WriteHeader(status)
-		w.Write(encoded)
+		_, _ = w.Write(encoded)
 	})
 
-	fmt.Printf("🌱 Sprouting %s on port %d\n", swagger.Info.Title, viper.GetInt("port"))
-	http.ListenAndServe(fmt.Sprintf(":%d", viper.GetInt("port")), nil)
+	fmt.Printf("🌱 Sprouting %s on port %d\n with options: %s", swagger.Info.Title, viper.GetInt("port"), corsStatus)
+	_ = http.ListenAndServe(fmt.Sprintf(":%d", viper.GetInt("port")), nil)
 }
